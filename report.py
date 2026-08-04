@@ -20,15 +20,19 @@ from typing import Any, Generator, Optional
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
-from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
+from sqlalchemy import DateTime, Integer, String, Text, create_engine, inspect, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from telegram import Bot
 
 
 load_dotenv()
 
-# SQLite 預設建立在專案目錄。部署時可用 DATABASE_URL 改成持久化磁碟路徑。
+# 本機預設用 SQLite；雲端部署（如 Railway）用 DATABASE_URL 指向 Postgres，
+# 讓 web／worker 兩個服務共用同一份資料。部分平台仍會給舊式的 postgres://
+# scheme，SQLAlchemy 2.0 不接受，統一正規化成 postgresql://。
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///earnings_reports.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6")
 APP_URL = os.getenv("APP_URL", "http://localhost:8501")
 
@@ -95,11 +99,13 @@ Base.metadata.create_all(engine)
 
 
 def _ensure_column(table: str, column: str, ddl_type: str) -> None:
-    """輕量級遷移：SQLite 既有資料表若缺少新欄位就補上，不刪資料。"""
+    """輕量級遷移：既有資料表若缺少新欄位就補上，不刪資料。用 SQLAlchemy inspect
+    取代資料庫專屬語法（如 SQLite 的 PRAGMA），同時相容 SQLite 與 Postgres。"""
 
-    with engine.connect() as conn:
-        existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
-        if column not in existing:
+    inspector = inspect(engine)
+    existing = {col["name"] for col in inspector.get_columns(table)}
+    if column not in existing:
+        with engine.connect() as conn:
             conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
             conn.commit()
 
